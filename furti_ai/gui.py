@@ -619,9 +619,55 @@ class FurtiApp(tk.Tk):
         )
         self.clear_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
 
+        # Progress: always visible, because it is the answer to "what is it
+        # doing right now" -- the task and its live progress should not be
+        # hidden behind a settings tab or an output tab.
+        progress_frame = ttk.LabelFrame(task_frame, text="Progress", padding=8)
+        progress_frame.pack(fill="x", pady=(10, 0))
+        self.progress_var = tk.StringVar(value="Idle")
+        self.progress_bar = ttk.Progressbar(
+            progress_frame,
+            mode="determinate",
+            maximum=100.0,
+            value=0.0,
+            length=280,
+        )
+        self.progress_bar.pack(fill="x")
+        ttk.Label(
+            progress_frame,
+            textvariable=self.progress_var,
+            style="Panel.TLabel",
+            wraplength=300,
+            justify="left",
+        ).pack(fill="x", pady=(6, 0))
+        self.progress_detail_var = tk.StringVar(value="")
+        ttk.Label(
+            progress_frame,
+            textvariable=self.progress_detail_var,
+            style="Muted.Panel.TLabel",
+            wraplength=300,
+            justify="left",
+        ).pack(fill="x", pady=(4, 0))
+
+        # The settings form is the bulky part of the panel and is only needed
+        # while tuning, so it starts collapsed behind this switch.
+        self.settings_visible_var = tk.BooleanVar(self, value=False)
+        self.settings_toggle = ttk.Checkbutton(
+            task_frame,
+            text="Settings",
+            variable=self.settings_visible_var,
+            command=self._toggle_settings,
+        )
+        self.settings_toggle.pack(fill="x", pady=(10, 0))
+
         notebook = ttk.Notebook(parent)
-        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.settings_notebook = notebook
+        self._settings_pack_options: dict[str, Any] = {
+            "fill": "both",
+            "expand": True,
+            "padx": 10,
+            "pady": (0, 10),
+        }
 
         model_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=8)
         input_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=8)
@@ -926,6 +972,7 @@ class FurtiApp(tk.Tk):
         try:
             settings = self._collect_settings()
         except (TypeError, ValueError) as exc:
+            self._show_settings()
             messagebox.showerror("Invalid settings", str(exc))
             return False
         try:
@@ -1316,6 +1363,9 @@ class FurtiApp(tk.Tk):
         try:
             settings = self._collect_settings()
         except (TypeError, ValueError) as exc:
+            # The form is collapsed by default, so a bad value has to reveal it
+            # or the user is told about a field they cannot see.
+            self._show_settings()
             messagebox.showerror("Invalid settings", str(exc))
             return
 
@@ -1497,6 +1547,7 @@ class FurtiApp(tk.Tk):
             )
         self.phase_var.set(phase)
         self._set_signal(*signal)
+        self._finish_progress(success)
         self._post_status(
             {
                 "phase": phase,
@@ -1534,6 +1585,81 @@ class FurtiApp(tk.Tk):
         self.task_input.delete("1.0", "end")
         self.task_input.focus_set()
 
+    # ------------------------------------------------------------- progress
+    def _toggle_settings(self) -> None:
+        """Show or hide the settings form (hidden by default)."""
+        if self.settings_visible_var.get():
+            self.settings_notebook.pack(**self._settings_pack_options)
+        else:
+            self.settings_notebook.pack_forget()
+
+    def _show_settings(self) -> None:
+        """Open the settings form (used when a run needs them changed)."""
+        self.settings_visible_var.set(True)
+        self._toggle_settings()
+
+    def _set_progress(
+        self,
+        current: float,
+        total: int,
+        label: str = "",
+    ) -> None:
+        """Render one progress update on the bar.
+
+        A known total gives a determinate bar (percentage of the work done); an
+        unknown total -- planning, waiting on the model -- gives the animated
+        indeterminate bar, so the UI always shows that something is happening.
+        """
+        bar = getattr(self, "progress_bar", None)
+        if bar is None:
+            return
+        if total > 0:
+            if str(bar.cget("mode")) != "determinate":
+                bar.stop()
+                bar.configure(mode="determinate")
+            percent = max(0.0, min(100.0, float(current) / float(total) * 100.0))
+            bar.configure(value=percent)
+            done = float(current)
+            if done >= total:
+                self.progress_var.set(f"All {total} step(s) done ({percent:.0f}%)")
+            else:
+                self.progress_var.set(
+                    f"Step {min(int(done) + 1, total)} of {total} "
+                    f"({percent:.0f}%)"
+                )
+        else:
+            if str(bar.cget("mode")) != "indeterminate":
+                bar.configure(mode="indeterminate")
+                bar.start(12)
+            self.progress_var.set(label or "Working...")
+        if label:
+            self.progress_detail_var.set(label)
+
+    def _reset_progress(self, label: str) -> None:
+        """Stop the bar and describe what is happening right now."""
+        bar = getattr(self, "progress_bar", None)
+        if bar is not None:
+            bar.stop()
+            bar.configure(mode="determinate", value=0.0)
+        self.progress_var.set(label)
+        self.progress_detail_var.set("")
+
+    def _finish_progress(self, success: bool) -> None:
+        """Freeze the bar at a final state when a run ends."""
+        bar = getattr(self, "progress_bar", None)
+        if bar is not None:
+            bar.stop()
+            bar.configure(mode="determinate")
+            if success:
+                bar.configure(value=100.0)
+        self.progress_detail_var.set("")
+        if success:
+            self.progress_var.set("Task complete")
+        elif self._stop_event.is_set():
+            self.progress_var.set("Stopped")
+        else:
+            self.progress_var.set("Finished without completing every step")
+
     def _clear_runtime_output(self) -> None:
         self._set_readonly_text(self.plan_text, "Planning has started...")
         self._set_readonly_text(self.ai_output, "Waiting for the first model response...")
@@ -1547,6 +1673,7 @@ class FurtiApp(tk.Tk):
         self.report_var.set("Report: pending")
         self._last_capture_epoch = 0.0
         self._last_capture_at = ""
+        self._reset_progress("Planning the task...")
         self._set_signal("AI THINKING", "#302c57", "#d8c8ff")
 
     # ------------------------------------------------------------ plan actions
@@ -1613,6 +1740,10 @@ class FurtiApp(tk.Tk):
         self._pending_confirmation = request
         self._set_readonly_text(self.plan_text, request.plan.describe())
         self.phase_var.set("Waiting for your approval")
+        # The size of the work is known now: show it before anything runs.
+        self._set_progress(
+            0, len(request.plan.steps), "waiting for your approval"
+        )
         self._set_signal("PLAN READY", "#1e3d59", "#9ed8ff")
         self._post_status(
             {
@@ -1705,6 +1836,15 @@ class FurtiApp(tk.Tk):
     def _apply_journal_event(self, snapshot: dict[str, Any]) -> None:
         kind = str(snapshot.get("event_kind") or "INFO")
         message = str(snapshot.get("message") or "")
+        if kind == "PROGRESS":
+            # The bar is the presentation of this event, so it is not duplicated
+            # as a log line: one line per sub-phase would bury the real events.
+            self._set_progress(
+                float(snapshot.get("progress_current", 0.0) or 0.0),
+                int(snapshot.get("progress_total", 0) or 0),
+                str(snapshot.get("progress_label") or ""),
+            )
+            return
         phase = snapshot.get("phase")
         if phase:
             self.phase_var.set(str(phase).title())

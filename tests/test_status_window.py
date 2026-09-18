@@ -36,6 +36,12 @@ class FakeWidget:
     def grid(self, **kwargs):
         self.grid_info = kwargs
 
+    def place(self, **kwargs):
+        self.place_info = kwargs
+
+    def place_configure(self, **kwargs):
+        self.place_info = {**getattr(self, "place_info", {}), **kwargs}
+
     def config(self, **kwargs):
         self.kwargs.update(kwargs)
 

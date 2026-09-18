@@ -63,8 +63,14 @@ class TaskJournal:
         kind: str,
         message: str,
         metadata: Optional[dict[str, Any]] = None,
+        print_to_console: bool = True,
     ) -> None:
-        """Log one event everywhere: console, status window, file buffer."""
+        """Log one event everywhere: console, status window, file buffer.
+
+        ``print_to_console=False`` keeps high-frequency UI telemetry (the
+        progress events behind the GUI bar) out of the console while the event
+        still reaches the journal, the report and the status window.
+        """
         event = LogEvent(
             kind=kind,
             message=message,
@@ -73,7 +79,8 @@ class TaskJournal:
         with self._lock:
             self._events.append(event)
             self._last_message = message
-        print(f"[{event.timestamp}] [{kind}] {message}", flush=True)
+        if print_to_console:
+            print(f"[{event.timestamp}] [{kind}] {message}", flush=True)
         if self.status_sink is not None:
             try:
                 phase = {
@@ -180,6 +187,29 @@ class TaskJournal:
 
     def reflex(self, message: str) -> None:
         self.record("REFLEX", message)
+
+    def progress(self, current: float, total: int, label: str = "") -> None:
+        """Publish how far the run has come, for the GUI progress bar.
+
+        ``current`` may be fractional so the bar also moves *within* a step
+        (locating the anchor, acting, verifying), and ``total <= 0`` means "the
+        size of the work is not known yet" -- planning or waiting on the model
+        -- which the UI renders as an indeterminate bar.
+        """
+        position = max(0.0, float(current))
+        size = max(0, int(total))
+        text = label.strip()
+        self.record(
+            "PROGRESS",
+            f"Progress: {position:g}/{size} {text}".strip(),
+            metadata={
+                "progress_current": position,
+                "progress_total": size,
+                "progress_label": text,
+                "progress_state": "determinate" if size > 0 else "indeterminate",
+            },
+            print_to_console=False,
+        )
 
     def model(self, message: str) -> None:
         self.record("MODEL", message)

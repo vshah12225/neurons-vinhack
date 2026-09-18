@@ -143,6 +143,23 @@ class StatusWindow:
             )
             action_label.pack(fill="x", padx=10, pady=(2, 0))
 
+            # Progress bar. Built from plain tk widgets (a track frame with a
+            # fill frame placed at a relative width) so the overlay keeps
+            # working with the minimal tkinter subset this module relies on.
+            progress_label = tk.Label(
+                root,
+                text="Progress: —",
+                bg="#101418",
+                fg="#9ed8ff",
+                font=("Consolas", 8, "bold"),
+                anchor="w",
+            )
+            progress_label.pack(fill="x", padx=10, pady=(4, 0))
+            bar_track = tk.Frame(root, bg="#252a30", height=6)
+            bar_track.pack(fill="x", padx=10, pady=(2, 0))
+            bar_fill = tk.Frame(bar_track, bg="#7fd1ff", height=6)
+            bar_fill.place(x=0, y=0, relwidth=0.0, relheight=1.0)
+
             ai_header = tk.Label(
                 root,
                 text="Latest AI output:",
@@ -240,6 +257,8 @@ class StatusWindow:
                 "activity": activity_label,
                 "screenshot": screenshot_label,
                 "action": action_label,
+                "progress": progress_label,
+                "progress_fill": bar_fill,
                 "ai_output": ai_output,
                 "log": log_text,
                 "stats": stats_label,
@@ -398,6 +417,8 @@ class StatusWindow:
             widgets["action"].config(
                 text=f"Current action: {snapshot['current_action']}"
             )
+        if event_kind == "PROGRESS" or "progress_total" in snapshot:
+            self._apply_progress(snapshot)
         if snapshot.get("ai_output") is not None:
             self._set_text(widgets["ai_output"], str(snapshot["ai_output"]))
         if event_kind == "ACTION":
@@ -439,6 +460,34 @@ class StatusWindow:
             text_widget.insert("1.0", "\n".join(self._log_lines))
             text_widget.see("end")
             text_widget.config(state="disabled")
+
+    def _apply_progress(self, snapshot: dict[str, Any]) -> None:
+        """Render the progress bar: determinate when the size is known.
+
+        An unknown total (planning, waiting on the model) leaves the fill empty
+        and says so in the label rather than showing a fake percentage.
+        """
+        widgets = self._widgets
+        total = int(snapshot.get("progress_total", 0) or 0)
+        current = float(snapshot.get("progress_current", 0.0) or 0.0)
+        label = str(snapshot.get("progress_label") or "")
+        fill = widgets.get("progress_fill")
+        text = widgets.get("progress")
+        if total > 0:
+            fraction = max(0.0, min(1.0, current / float(total)))
+            if current >= total:
+                caption = f"Progress: {total}/{total} done"
+            else:
+                caption = f"Progress: step {min(int(current) + 1, total)} of {total}"
+        else:
+            fraction = 0.0
+            caption = "Progress: working..."
+        if label:
+            caption = f"{caption} — {label}"
+        if fill is not None:
+            fill.place_configure(relwidth=fraction)
+        if text is not None:
+            text.config(text=caption[:120])
 
     def _set_activity(self, text: str, bg: str, fg: str) -> None:
         widget = self._widgets.get("activity")

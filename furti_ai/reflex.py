@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -34,6 +35,23 @@ from .models import Skill
 logger = logging.getLogger(__name__)
 
 __all__ = ["REALIGN_SYSTEM_PROMPT", "RealignResult", "ReflexRealigner"]
+
+#: A re-located anchor further than this fraction of the screen diagonal from
+#: the stored one is not "the same element, moved" -- it is a different control.
+#: On a screen with two identical input boxes that is exactly how a wrong answer
+#: used to be accepted and then written over a good stored template, turning a
+#: transient mismatch into a permanent mis-click. The orchestrator falls back to
+#: re-planning when this refuses, so refusing is always safe.
+REALIGN_DRIFT_REJECT_FRACTION = 0.5
+
+#: Above this fraction of the diagonal the move is plausible but large (a window
+#: dragged, a list scrolled, a panel resized), so the re-location has to be
+#: confident as well as plausible.
+REALIGN_DRIFT_WARN_FRACTION = 0.25
+
+#: Confidence a large-drift re-alignment must reach, on top of
+#: ``reflex_min_anchor_confidence``.
+REALIGN_DRIFT_MIN_CONFIDENCE = 0.9
 
 REALIGN_SYSTEM_PROMPT = (
     "You are the reflex re-alignment component of Furti AI, a desktop "
@@ -53,6 +71,79 @@ REALIGN_SYSTEM_PROMPT = (
     "element is genuinely not on screen -- do not guess a location you cannot "
     "see."
 )
+
+
+def _previous_center(
+    metadata: Any, frame_width: int, frame_height: int
+) -> Optional[tuple[int, int]]:
+    """The stored anchor's centre in *this* frame's pixels, when it is usable.
+
+    ``expected_bbox`` was recorded on a screen of ``screen_size`` pixels, so it
+    is scaled by the frame-size ratio before use. An anchor that then falls
+    outside the frame describes some other screen (another monitor, a stale
+    size, hand-written metadata), so it is ignored rather than trusted -- a
+    guard that refused a re-alignment on unusable evidence would block a
+    legitimate repair.
+    """
+    if not isinstance(metadata, dict):
+        return None
+    bbox = metadata.get("expected_bbox")
+    if not isinstance(bbox, dict):
+        return None
+    try:
+        x = int(bbox["x"])
+        y = int(bbox["y"])
+        width = int(bbox["width"])
+        height = int(bbox["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    scale_x = scale_y = 1.0
+    size = metadata.get("screen_size")
+    if isinstance(size, (list, tuple)) and len(size) == 2:
+        try:
+            stored_w, stored_h = int(size[0]), int(size[1])
+        except (TypeError, ValueError):
+            stored_w = stored_h = 0
+        if stored_w > 0 and stored_h > 0:
+            scale_x = frame_width / stored_w
+            scale_y = frame_height / stored_h
+
+    center_x = int(round((x + width / 2) * scale_x))
+    center_y = int(round((y + height / 2) * scale_y))
+    if not (0 <= center_x <= frame_width and 0 <= center_y <= frame_height):
+        return None
+    return center_x, center_y
+
+
+def _drift_fraction(
+    metadata: Any,
+    bbox: tuple[int, int, int, int],
+    frame_shape: Any,
+) -> Optional[float]:
+    """How far ``bbox`` sits from the stored anchor, as a share of the diagonal.
+
+    ``None`` when the reflex carries no usable previous anchor: there is then
+    nothing to compare against and the guard does not apply.
+    """
+    try:
+        frame_height = int(frame_shape[0])
+        frame_width = int(frame_shape[1])
+    except (IndexError, TypeError, ValueError):
+        return None
+    if frame_width <= 0 or frame_height <= 0:
+        return None
+    previous = _previous_center(metadata, frame_width, frame_height)
+    if previous is None:
+        return None
+    diagonal = math.hypot(frame_width, frame_height)
+    if diagonal <= 0:
+        return None
+    current_x = bbox[0] + bbox[2] / 2
+    current_y = bbox[1] + bbox[3] / 2
+    return math.hypot(current_x - previous[0], current_y - previous[1]) / diagonal
 
 
 @dataclass(frozen=True)
@@ -184,6 +275,36 @@ class ReflexRealigner:
                 ),
             )
 
+        # A plausible-looking answer is not enough: the model may have found a
+        # *different* control that looks the same. Without this check the new
+        # anchor is written over the stored one for every later replay.
+        drift = _drift_fraction(skill.metadata, bbox, frame.shape)
+        if drift is not None:
+            if drift > REALIGN_DRIFT_REJECT_FRACTION:
+                reason = (
+                    f"the re-located element sits {drift:.0%} of the screen "
+                    "diagonal from its previous position, which is a different "
+                    "control rather than the same one moved"
+                )
+                self._warn(f"Reflex {skill.name!r} re-alignment refused: {reason}.")
+                return RealignResult(ok=False, reason=reason)
+            if drift > REALIGN_DRIFT_WARN_FRACTION:
+                required = max(threshold, REALIGN_DRIFT_MIN_CONFIDENCE)
+                if confidence < required:
+                    reason = (
+                        f"the re-located element moved {drift:.0%} of the screen "
+                        f"diagonal and its confidence {confidence:.2f} is below "
+                        f"the {required:.2f} such a move requires"
+                    )
+                    self._warn(
+                        f"Reflex {skill.name!r} re-alignment refused: {reason}."
+                    )
+                    return RealignResult(ok=False, reason=reason)
+                self._warn(
+                    f"Reflex {skill.name!r} re-aligned {drift:.0%} of the screen "
+                    "diagonal away from its previous position."
+                )
+
         crop, error = _crop(frame, bbox)
         if crop is None:
             return RealignResult(ok=False, reason=error or "the bbox was not usable")
@@ -204,13 +325,16 @@ class ReflexRealigner:
         skill.metadata["anchor"] = f"realigned conf={confidence:.2f}"
         skill.metadata["realign_note"] = str(payload.get("note", "")).strip()
         skill.metadata["realign_of"] = previous
+        if drift is not None:
+            skill.metadata["realign_drift"] = round(drift, 3)
         skill.record_realign(str(path))
         save = getattr(self._memory, "save_skill", None)
         if callable(save):
             save(skill)
         self._journal_note(
             f"Re-aligned reflex {skill.name!r} -> {Path(path).name} "
-            f"(confidence {confidence:.2f}, was {previous})"
+            f"(confidence {confidence:.2f}, was {previous}"
+            f"{f', drift {drift:.0%}' if drift is not None else ''})"
         )
         return RealignResult(ok=True, skill=skill, confidence=confidence)
 

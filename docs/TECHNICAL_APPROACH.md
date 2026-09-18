@@ -79,6 +79,46 @@ Safety tab's control so the two stay in sync), `Refresh` / `Enable all` /
 `Disable all`, and one row per cached reflex with its own checkbox, name, action
 and hit/miss counters, and a delete button.
 
+The settings form is the bulky half of the panel and is only needed while
+tuning, so it starts **collapsed** behind the **Settings** toggle
+(`_toggle_settings`, `settings_visible_var`): `_settings_pack_options` holds the
+geometry arguments so hiding and re-showing the notebook is one `pack` /
+`pack_forget` pair with no duplicate configuration. Every setting still exists
+as a widget and a `tk.Variable` while hidden, so `_collect_settings` and the
+reflex list are unaffected by visibility. Anything that needs the user to change
+a value reveals the form first (`_show_settings`): an invalid value found by
+`_collect_settings` opens the panel before the error dialog, otherwise the user
+would be told about a field they cannot see.
+
+### Progress reporting
+
+Two widgets answer "what is it doing right now": the always-visible **Progress**
+card in the left column (label, `ttk.Progressbar`, detail line) and the matching
+bar in the always-on-top status window.
+
+The data comes from one structured journal event rather than from parsing log
+text. `TaskJournal.progress(current, total, label)` records a `PROGRESS` event
+whose metadata carries `progress_current` (float), `progress_total` (int) and
+`progress_label`; `print_to_console=False` keeps these high-frequency updates out
+of the console while they still reach the journal, the report and the status
+sink.
+
+| Producer | Emission |
+| --- | --- |
+| `TaskPlanner.plan` | `progress(0, 0, ...)` before the model call (unknown size) and `progress(0, len(steps), "plan ready")` after |
+| `TaskAgent.run_task` | `progress(0, 0, "planning ...")` and `progress(0, len(steps), "waiting for your approval")` |
+| `PlanExecutor.execute` | once per step (`position/total`), again after an adaptive re-plan changed the route, and a final `finished`/`aborted` |
+| `PlanExecutor._step_progress` | `0.15` locating, `0.5` acting, `0.8` verifying *within* the step |
+
+`total <= 0` means "the size of the work is not known yet", which the GUI
+renders as an animated indeterminate bar instead of a fake percentage;
+`_set_progress` switches modes as soon as a total arrives and stops the
+animation (`bar.stop()`) exactly once. The fraction is clamped to 100 %, so a
+re-plan that shrinks the route cannot over-fill the bar. The Event Log does not
+repeat `PROGRESS` lines: one line per sub-phase would bury the real events, and
+the bar already shows them. `_finish_progress(success)` freezes the bar and says
+how the run ended (complete / stopped / finished without completing every step).
+
 `FurtiApp` still shows the always-on-top readout itself: it builds
 `StatusWindow(master=self)`, which makes the overlay a `Toplevel` of the main
 window instead of a second `tk.Tk` root. The overlay is pumped by a
@@ -112,6 +152,9 @@ embedded (`tk.Toplevel(master=...)`, used by the GUI), selected by the
      from `plan.frame` and template-matched on the live frame → explicit
      model-supplied pixel (`x`/`y`) → focused-window fallback for
      `type`/`scroll`/`key_press`,
+   - when several live controls match a step equally well, the one nearest the
+     point the plan named (its `bbox` centre, or its explicit `x`/`y`) wins; see
+     *Disambiguating repeated controls* below,
    - keyboard chords (`ctrl+shift+t`) and drags (anchor or explicit pixel →
      named or offset drop point) via `PyAutoGuiInput`; see *Keyboard and drag
      dispatch* below,
@@ -331,6 +374,40 @@ derived inside it, because only the caller knows whether the point came from
 the screen or from the cursor fallback. The planner prompt asks for the field
 as the `target` (or as explicit pixels) whenever the model can see it.
 
+### Disambiguating repeated controls
+
+Clicking the field is only half the problem: on a screen with two identical
+targets the agent has to pick the *right* one. Nothing in the original chain
+used the plan's own geometry — `_best_ocr_target` scored matches by
+`(score, OCR confidence)` and kept the first, and `vision.locate_on` kept the
+global `TM_CCOEFF_NORMED` maximum. So:
+
+* two fields sharing a label (two "Search" boxes, a "Name" field in the page
+  and in a dialog) resolved to whichever line the OCR backend happened to read
+  more confidently, then top-to-bottom;
+* a crop of an **empty** input box is near-uniform, so template matching on the
+  live frame peaked on a *different* identical box — a visual form of the same
+  bug;
+* the inserted focus-click step clones the type step's `bbox`/`target`, so both
+  steps resolved to the same wrong field and the text landed in the wrong box.
+
+The plan's own point is the only evidence of which control was meant, so it is
+now a first-class tie-break:
+
+| Layer | Change |
+| --- | --- |
+| `executor._plan_anchor_point(step)` | The point the plan intended, in `full_capture` pixels: `bbox.center` first, else the explicit `x`/`y` (a `(0, 0)` placeholder counts as "nothing named") |
+| `executor._ocr_candidates` + `_rank_ocr_candidates` | Scoring is split from ranking. Rank key = match score → near/far tier (inside `ANCHOR_PROXIMITY_PX`, 250 px) → squared distance → OCR confidence → detection order. Proximity is *inside* the score bucket, so a weak partial match that sits nearer can never outrank an exact label |
+| `executor._report_ambiguous_anchor` | When 2+ controls share the top score, the journal records every candidate and which one won, so a wrong pick is visible in the report instead of silent |
+| `vision._peaks` + `locate_on(..., near=)` | Greedy non-max suppression returns the strongest locations (template-sized neighbourhood zeroed between picks). Every peak within `MATCH_TIE_MARGIN` (0.03) of the best is a candidate and the nearest to `near` wins |
+| `vision.VisionReflex.execute` | Feeds `near` from the skill's stored `expected_bbox`, scaled by the frame-size ratio when `screen_size` has changed. No usable metadata ⇒ plain global argmax, exactly as before |
+
+`_best_ocr_target` keeps its `(target, scene, reference=None)` signature and is
+the thin wrapper over the same ranking, so the existing callers and tests still
+see one source of truth. `ANCHOR_PROXIMITY_PX` and `MATCH_TIE_MARGIN` are module
+constants, not settings: both are disambiguation tolerances, and the
+per-candidate decision is already visible in the journal note.
+
 ### Screen-corner abort (and why the mouse used to freeze)
 
 pyautogui raises `FailSafeException` while the pointer sits exactly on a screen
@@ -514,6 +591,17 @@ moved, the list scrolled, the theme changed. Two paths handle that:
   unquantified guess is how a good reflex becomes a bad one. Accepted answers
   overwrite the template and `expected_bbox`, bump `realign_count`, reset
   `failure_count`, and are replayed once.
+* **Drift guard** — shape and confidence alone cannot tell "the same control
+  moved" from "the model found a *different*, identical-looking control". When
+  the skill carries a usable previous anchor (one that, scaled by the
+  frame-size ratio, lands inside the frame), `reflex._drift_fraction` measures
+  how far the new bbox sits from it as a share of the screen diagonal. More than
+  `REALIGN_DRIFT_REJECT_FRACTION` (0.5) is refused outright — the orchestrator
+  then re-plans, which is always safe — and above
+  `REALIGN_DRIFT_WARN_FRACTION` (0.25) the re-location must also clear
+  `REALIGN_DRIFT_MIN_CONFIDENCE` (0.9). Accepted answers record `realign_drift`,'
+  and an unusable previous anchor (missing metadata, or one that falls outside
+  the frame) skips the guard rather than blocking a legitimate repair.
 * **Step path** — inside a multi-step task, the *first* failure of a screen
   action triggers `TaskPlanner.realign_step` (same intent, same action where
   possible, corrected anchor from the current grounding) instead of
@@ -630,6 +718,10 @@ key* rather than a different prompt.
 | 6t | Render delay paces state-changing actions; a no-change failure is not repeated blindly | `executor.py._await_render_delay`, `_last_dispatch_at`, `render_delay` | ✅ |
 | 6u | Control payloads must be one strict JSON object; the endpoint is asked for JSON-only output | `jsoncontract.py`, `planner.PlanStep.from_dict`, `brain.DeepSeekClient._create_json` / `GeminiClient._generate_json`, `llm_json_mode` | ✅ |
 | 6v | An off-screen resolved point is refused instead of dispatched | `executor.py._is_point_on_screen`, `windows.virtual_screen_rect` | ✅ |
+| 6w | Repeated/identical controls are disambiguated by the point the plan named (OCR proximity tie-break + `expected_bbox`-nearest template peak on replay) | `executor.py._plan_anchor_point`, `_ocr_candidates`, `_rank_ocr_candidates`, `_report_ambiguous_anchor`, `vision.py._peaks`, `locate_on(near=)`, `VisionReflex._expected_center` | ✅ |
+| 6x | A re-alignment that lands on a different control is refused instead of overwriting the stored anchor | `reflex.py._drift_fraction`, `REALIGN_DRIFT_REJECT_FRACTION` / `REALIGN_DRIFT_WARN_FRACTION` / `REALIGN_DRIFT_MIN_CONFIDENCE`, `realign_drift` metadata | ✅ |
+| 6w | Progress bar driven by structured `PROGRESS` journal events (indeterminate while the size is unknown) | `tasklog.TaskJournal.progress`, `planner`/`agent`/`executor` emissions, `gui._set_progress`, `status._apply_progress` | ✅ |
+| 6x | Settings form collapsed behind a toggle; revealed automatically when a value needs fixing | `gui._toggle_settings`, `_show_settings`, `settings_visible_var` | ✅ |
 | 6p | User/system context file (paths, apps, drives, notes) injected into prompts | `profile.py` — `UserContext`; `<workspace>/context/profile.{json,md}` | ✅ |
 | 6q | User-editable notes in `profile.md` reloaded as facts | `profile.py` — `_notes_from_markdown` | ✅ |
 | 6r | Cross-provider verification of critical steps (different provider + API key) | `verifier.py` — `CrossVerifier`, `criticality`; `orchestrator.build_secondary_llm` | ✅ |
@@ -934,6 +1026,8 @@ and a step costs the slower call instead of the sum of both.
 | `run_command` exceeds `FURTI_TOOL_TIMEOUT` | the step fails with "command timed out after Ns"; the run continues/re-plans |
 | `FURTI_DIRECT_TOOLS=false` | tool steps fail with a "disabled" reason instead of silently degrading to a mouse route |
 | Reflex does not match the screen | counted as a miss, then re-aligned by the LLM (template + `expected_bbox` rewritten) and replayed once; retired after `reflex_retire_failures` misses |
+| Two identical controls and the plan named no point | the pick falls back to OCR confidence, then detection order — the journal note "nearest of N matches" records that the choice was arbitrary; give the step a `bbox` or explicit `x`/`y` to settle it |
+| Re-aligned anchor is far from the previous one | refused above `REALIGN_DRIFT_REJECT_FRACTION`, or above `REALIGN_DRIFT_WARN_FRACTION` unless confidence clears `REALIGN_DRIFT_MIN_CONFIDENCE`; the stored template is left untouched and the planner is asked for a fresh route |
 | Reflex re-alignment answer is vague (no `found`, no confidence, off-frame bbox) | rejected; the stored template is left untouched and the planner is asked for a fresh route |
 | A step has no usable anchor | first failure re-aligns the step (same action, corrected anchor); a second failure re-plans it; the stale reflex is counted/retired |
 | Cross-verifier rejects a critical step | the step is **not dispatched**; the veto and its safer alternative become the failure note the planner re-plans from |

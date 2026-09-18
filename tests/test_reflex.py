@@ -222,6 +222,106 @@ def test_realign_rejects_unusable_geometry(tmp_path, bbox):
     assert skill.realign_count == 0
 
 
+def _drifting_skill(tmp_path, **overrides):
+    """A reflex whose stored anchor is usable on the 140x100 fake screen."""
+    metadata = {
+        "description": "Click the Export button",
+        "target": "Export",
+        "expected_bbox": {"x": 16, "y": 12, "width": 8, "height": 8},
+        "screen_size": [140, 100],
+        "anchor": "OCR text 'Export'",
+    }
+    metadata.update(overrides)
+    return make_skill(tmp_path, metadata=metadata)
+
+
+def test_realign_refuses_an_anchor_that_lands_on_a_different_control(tmp_path):
+    # A confident answer on the far side of the stored anchor is a different
+    # control, not the same one moved. Overwriting the template with it is how
+    # one wrong guess became permanent for every later replay.
+    settings = make_settings(tmp_path)
+    skill = _drifting_skill(tmp_path)
+    llm = ScriptedLLM(
+        '{"found": true, "bbox": {"x": 126, "y": 88, "width": 8, "height": 8}, '
+        '"confidence": 0.99, "note": "found it on the other side"}'
+    )
+    journal = FakeJournal()
+    realigner = ReflexRealigner(
+        settings, llm, MemoryManager(settings.memory_file), FakeScreen(), journal
+    )
+
+    result = realigner.realign(skill)
+
+    assert result.ok is False
+    assert "different control" in result.reason
+    assert skill.realign_count == 0
+    assert skill.metadata["expected_bbox"] == {"x": 16, "y": 12, "width": 8, "height": 8}
+    # The stored template is the original placeholder, untouched.
+    assert cv2.imread(skill.template_path, cv2.IMREAD_COLOR).shape[:2] == (12, 12)
+    assert "refused" in journal.messages()
+
+
+def test_a_large_but_plausible_move_needs_more_confidence(tmp_path):
+    settings = make_settings(tmp_path)
+    skill = _drifting_skill(tmp_path)
+    # ~0.32 of the diagonal: plausible (a window moved) but not certain.
+    llm = ScriptedLLM(
+        '{"found": true, "bbox": {"x": 66, "y": 36, "width": 8, "height": 8}, '
+        '"confidence": 0.85, "note": "the panel moved right"}'
+    )
+    realigner = ReflexRealigner(
+        settings, llm, MemoryManager(settings.memory_file), FakeScreen(), FakeJournal()
+    )
+
+    result = realigner.realign(skill)
+
+    assert result.ok is False
+    assert "0.90" in result.reason
+    assert skill.realign_count == 0
+
+
+def test_a_large_but_confident_move_is_accepted_and_records_the_drift(tmp_path):
+    settings = make_settings(tmp_path)
+    skill = _drifting_skill(tmp_path)
+    llm = ScriptedLLM(
+        '{"found": true, "bbox": {"x": 66, "y": 36, "width": 8, "height": 8}, '
+        '"confidence": 0.95, "note": "the panel moved right"}'
+    )
+    journal = FakeJournal()
+    realigner = ReflexRealigner(
+        settings, llm, MemoryManager(settings.memory_file), FakeScreen(), journal
+    )
+
+    result = realigner.realign(skill)
+
+    assert result.ok is True
+    assert skill.metadata["realign_drift"] > 0.25
+    assert "drift" in journal.messages()
+
+
+def test_an_unusable_stored_anchor_does_not_block_a_repair(tmp_path):
+    # A previous bbox outside the frame cannot describe this screen, so it is
+    # not evidence of anything: the guard fails open instead of blocking a
+    # legitimate repair.
+    settings = make_settings(tmp_path)
+    skill = _drifting_skill(
+        tmp_path,
+        expected_bbox={"x": 900, "y": 700, "width": 40, "height": 20},
+    )
+    llm = ScriptedLLM(
+        '{"found": true, "bbox": {"x": 66, "y": 36, "width": 8, "height": 8}, '
+        '"confidence": 0.8, "note": "moved"}'
+    )
+    realigner = ReflexRealigner(
+        settings, llm, MemoryManager(settings.memory_file), FakeScreen(), FakeJournal()
+    )
+
+    result = realigner.realign(skill)
+
+    assert result.ok is True
+    assert "realign_drift" not in skill.metadata
+
+
 def test_realign_is_disabled_by_setting(tmp_path):
     settings = make_settings(tmp_path, reflex_realign=False)
     realigner = ReflexRealigner(settings, ScriptedLLM("{}"), MemoryManager(settings.memory_file), FakeScreen())

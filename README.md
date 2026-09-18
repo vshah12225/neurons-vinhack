@@ -105,16 +105,26 @@ python app.py
 The window provides:
 
 - a natural-language task editor and task/reflex mode selector,
-- masked provider/API-key fields and an expandable panel for every
-  [`Settings`](furti_ai/config.py) option, grouped into **Models / Input /
+- an always-visible **Progress** bar with a live caption: it shows
+  "Step 2 of 5 (40%)" while the run works through the plan, advances within a
+  step (locating the target → acting → verifying), and animates as an
+  indeterminate bar while the task is still being planned, so the window always
+  shows that something is happening,
+- a **Settings** toggle: the settings form is collapsed by default and appears
+  when you tick it (it also opens itself if a value needs fixing). Everything
+  inside it is the same topic-tabbed form, grouped into **Models / Input /
   Safety / Vision / Advanced / AI Context / Reflexes** tabs,
+- masked provider/API-key fields and a control for every
+  [`Settings`](furti_ai/config.py) option,
 - a **Reflexes** tab listing every compiled reflex with per-reflex on/off
   switches (new reflexes are stored disabled), hit/miss counters, bulk
   enable/disable and delete controls,
 - a live plan preview with **Approve and run**, **Edit and re-plan**, and
   **Decline** controls,
 - live phase, current step, screenshot age, current action, AI response,
-  token/cost estimate, and report-path indicators,
+  token/cost estimate, and report-path indicators (the always-on-top status
+  window mirrors the same progress bar for when the main window is behind
+  something else),
 - a scrollable event log that mirrors the timestamped console transparency,
 - a Stop button that shares the global `<ctrl>+<alt>+k` abort event.
 
@@ -236,6 +246,17 @@ While running:
   and a `type` step with no target types into whichever control already has
   focus — which is why "type at the search box" no longer dumps the text into
   the window that happened to be focused,
+- **the right one of several identical controls is picked**: a label is not an
+  identity, so when two fields share a label or placeholder (two "Search"
+  boxes, a "Name" field in a page and in a dialog) or several buttons look the
+  same, the agent prefers the control nearest the point the step named — the
+  centre of its `bbox`, or its explicit `x`/`y`. Closeness only ever breaks a
+  tie between equally good matches, so an exact label still beats a vague
+  description that happens to sit nearer. The same rule is applied when a
+  planned crop of an empty input box is re-found on the live screen (an empty
+  box is near-uniform, and template matching used to peak on any identical
+  box). When the plan names no point and several controls tie, the log says so
+  — "nearest of N matches" — instead of choosing silently,
 - **a popup never gets read as content**: before acting, the agent asks which
   window owns the target pixel. If a dialog, cookie banner or modal is sitting
   on it — or the target text is missing while the screen offers a `Close`/`X`
@@ -261,7 +282,9 @@ While running:
   pass on a downscaled frame (multi-scale matching remains an explicit
   opt-in). One-off anchor crops captured during execution are excluded from
   the icon library, so only genuine saved templates are advertised to the
-  model as clickable icons,
+  model as clickable icons. Template matches are not just the single strongest
+  hit either: when the caller knows where the target should be, every location
+  scoring within a hair of the best is a candidate and the nearest one wins,
 - the LLM can select `text`, `visual`, or `both` evidence in the post-step
   review; the review waits out the 1-second capture floor so it always judges
   a frame taken **after** the action (an unverified step is logged as
@@ -360,7 +383,13 @@ theme changed), the agent no longer throws it away:
 1. **Re-align** — the failing reflex goes back to the LLM with the live
    screenshot and its own identity ("this element, where is it now?"). A
    confident, in-frame answer overwrites the stored template and expected bbox,
-   and the reflex is replayed.
+   and the reflex is replayed. Shape and confidence alone cannot tell "the same
+   control moved" from "the model found a different, identical-looking one", so
+   an answer that lands more than half a screen diagonal away from the previous
+   anchor is refused instead (the stored template is left untouched and the
+   step is re-planned) — on a screen with two identical input boxes that is how
+   a wrong answer used to become the new ground truth for every later replay.
+   A move above a quarter of the diagonal also has to clear 0.9 confidence.
 2. **Re-plan** — only if re-alignment fails does the model route around the step
    with a different action.
 3. **Retire** — a reflex that keeps missing (`FURTI_REFLEX_RETIRE_FAILURES`,

@@ -108,6 +108,7 @@ class TaskAgent:
         )
 
         self._journal.system("Phase 1/3: planning ...")
+        self._journal.progress(0, 0, "planning the task with the model")
         self._publish_profile()
         for _ in range(3):
             try:
@@ -144,6 +145,9 @@ class TaskAgent:
             plan.task_name, plan.goal, plan.steps, plan.reasoning
         )
         self._selected_plan = plan
+        # The size of the work is known now, so the bar can show it while the
+        # user decides.
+        self._journal.progress(0, len(plan.steps), "waiting for your approval")
         # The independent verifier audits the critical steps before the user is
         # asked to approve, so the human sees the objection while deciding.
         self._review_plan(instruction, plan)

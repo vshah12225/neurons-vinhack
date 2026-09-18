@@ -8,6 +8,10 @@ Each planned step is executed like this:
    majority word overlap, so fragments such as ``none`` never match
    ``nonexistent``) -> planned bbox cropped
    from the planning-time screenshot and template-matched on the live frame.
+   When several live controls match equally well -- two identical input boxes,
+   the same label in a page and in a dialog -- the one nearest the point the
+   plan named (its ``bbox`` centre, or its explicit ``x``/``y``) wins, so a
+   repeated label can never send the caret to the wrong field.
 3. The action is performed (cursor visibly moves unless teleporting).
 4. The model can review the completed step and readiness of the next step in
    one request, choosing text or visual evidence as appropriate.
@@ -62,6 +66,17 @@ logger = logging.getLogger(__name__)
 #: explicit "click the field" step and the type step's self-healing click do
 #: not press the same spot twice.
 FOCUS_CLICK_TOLERANCE_PX = 12
+
+#: How close a live candidate control must sit to the point the plan named (the
+#: centre of its ``bbox``, or its explicit ``x``/``y``) to count as "the control
+#: the model meant" when several on screen match the same text. Proximity is
+#: only ever a tie-break *inside* one match-score bucket, so it can never
+#: promote a weak partial match over a strong exact one.
+ANCHOR_PROXIMITY_PX = 250
+
+#: Ranking-key filler for a candidate whose centre cannot be read: it sorts
+#: behind every real distance while keeping the key integer-only.
+_UNREACHABLE_DISTANCE_SQ = 1 << 60
 
 #: OCR labels that dismiss a blocking dialog, in preference order: a close
 #: affordance is always safer than an accept button, because accepting cookies
@@ -316,6 +331,8 @@ class PlanExecutor:
         plan_replans = 0
         position = 0
         self._instruction = instruction
+        self._progress_total = len(plan.steps)
+        self._journal.progress(0, self._progress_total, "starting")
 
         # An index-based loop lets an adaptive re-plan replace the unfinished
         # route without replaying steps that already completed.
@@ -323,6 +340,11 @@ class PlanExecutor:
             self._check_stop()
             step = plan.steps[position]
             total = len(plan.steps)
+            self._progress_offset = position
+            self._progress_total = total
+            self._journal.progress(
+                position, total, f"step {position + 1}: {step.description}"
+            )
             self._journal.step(
                 f"[{position + 1}/{total}] {step.description} "
                 f"[action={step.action.value}]"
@@ -387,6 +409,12 @@ class PlanExecutor:
                     )
                     plan.steps = plan.steps[:position] + replacement
                     failures_in_a_row = 0
+                    self._progress_total = len(plan.steps)
+                    self._journal.progress(
+                        position,
+                        self._progress_total,
+                        "route revised",
+                    )
                     continue
 
                 self._record_result(report, result)
@@ -401,6 +429,11 @@ class PlanExecutor:
                     )
                     self._journal.error(report.reason)
                     break
+        self._journal.progress(
+            self._progress_total if not report.aborted else position,
+            self._progress_total,
+            "aborted" if report.aborted else "finished",
+        )
         return report
 
     def close(self) -> None:
@@ -538,6 +571,7 @@ class PlanExecutor:
             )
 
             resolve_started = time.perf_counter()
+            self._step_progress(0.15, f"locating {step.target or step.description!r}")
             target = self._resolve_target(step, scene, plan)
             resolve_duration = time.perf_counter() - resolve_started
             if target is not None and target.capture_coordinates:
@@ -609,6 +643,7 @@ class PlanExecutor:
                         attempts = max(0, attempts - 1)
                         continue
                 self._await_render_delay(step)
+                self._step_progress(0.5, f"{step.action.value}: {step.description}")
                 try:
                     self._perform_action(
                         step,
@@ -641,6 +676,7 @@ class PlanExecutor:
                         f"Step {step.index}: {step.action.value} input "
                         "dispatched successfully."
                     )
+                    self._step_progress(0.8, "verifying the result")
                     review = self._parallel_review(
                         instruction,
                         step,
@@ -1090,7 +1126,12 @@ class PlanExecutor:
             return self._resolve_drag_target(step, scene, plan, point)
 
         anchor = self._anchor_for_target(
-            step.target or "", step.bbox, scene, plan, step.index
+            step.target or "",
+            step.bbox,
+            scene,
+            plan,
+            step.index,
+            reference=self._plan_anchor_point(step),
         )
         if anchor is not None:
             center, template_path, note = anchor
@@ -1122,12 +1163,15 @@ class PlanExecutor:
         scene: SceneObservation,
         plan: TaskPlan,
         label: Any,
+        reference: Optional[tuple[int, int]] = None,
     ) -> Optional[tuple[tuple[int, int], Optional[Path], str]]:
         """Find a live anchor as ``(center, template_path, note)``.
 
         Prefers a named icon the model was shown, then the step text found on
         the live frame, then the crop the planner drew on the plan frame
-        re-anchored on the live frame.
+        re-anchored on the live frame. ``reference`` is the full-capture point
+        the plan intended; it breaks ties between several live controls that
+        match equally well (see :meth:`_rank_ocr_candidates`).
         """
         target = str(target or "").strip()
 
@@ -1147,19 +1191,32 @@ class PlanExecutor:
                     )
 
         if target:
-            candidate = self._best_ocr_target(target, scene)
-            if candidate is not None:
-                line, _score = candidate
+            ranked = self._rank_ocr_candidates(
+                self._ocr_candidates(target, scene), reference
+            )
+            if ranked:
+                score, _confidence, line = ranked[0]
+                note = f"OCR text {line.text!r}"
+                tied = [row for row in ranked if row[0] == score]
+                if len(tied) > 1:
+                    note = f"{note} (nearest of {len(tied)} matches)"
+                    self._report_ambiguous_anchor(
+                        target, label, tied, line, reference
+                    )
                 return (
                     line.center,
                     self._crop_ocr_anchor(scene, line),
-                    f"OCR text {line.text!r}",
+                    note,
                 )
 
         if bbox is not None and plan.frame is not None:
             crop = self._crop_from_plan_frame(plan.frame, bbox)
             if crop is not None and scene.frame is not None and self._vision is not None:
-                match = self._vision.locate_on(scene.frame, crop)
+                try:
+                    match = self._vision.locate_on(scene.frame, crop, near=reference)
+                except TypeError:
+                    # A duck-typed vision backend without proximity support.
+                    match = self._vision.locate_on(scene.frame, crop)
                 if match is not None:
                     (x, y), confidence, (tw, th) = match
                     if confidence >= self._settings.confidence_threshold:
@@ -1206,6 +1263,40 @@ class PlanExecutor:
             return None
 
     @staticmethod
+    def _bbox_reference(bbox: Any) -> Optional[tuple[int, int]]:
+        """Centre of a planner bbox as a disambiguation reference point.
+
+        A ``(0, 0)`` centre is the schema's "no explicit pixel" placeholder and
+        is treated as "the plan named nothing", not as a target at the origin.
+        """
+        if bbox is None:
+            return None
+        try:
+            center = tuple(int(v) for v in bbox.center)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if len(center) != 2 or center == (0, 0):
+            return None
+        return center
+
+    def _plan_anchor_point(self, step: PlanStep) -> Optional[tuple[int, int]]:
+        """The point the plan intended, in full-capture pixels.
+
+        ``PlanStep.bbox`` and the explicit ``x``/``y`` are both normalised to
+        the frame's coordinate space at planning time, so either can be compared
+        with live OCR lines and template matches. The bbox wins: it is what the
+        planner drew around the specific control it meant.
+        """
+        reference = self._bbox_reference(step.bbox)
+        if reference is not None:
+            return reference
+        point = self._step_point(step)
+        if point is None or point == (0, 0):
+            # ``(0, 0)`` is the schema placeholder; it means "no pixel given".
+            return None
+        return point
+
+    @staticmethod
     def _drag_origin(params: dict[str, Any]) -> Optional[tuple[int, int]]:
         """Explicit ``from_x``/``from_y`` grab point, in full-capture pixels."""
         from_x = _as_float(params.get("from_x"))
@@ -1230,7 +1321,12 @@ class PlanExecutor:
         """
         params = step.params or {}
         anchor = self._anchor_for_target(
-            step.target or "", step.bbox, scene, plan, step.index
+            step.target or "",
+            step.bbox,
+            scene,
+            plan,
+            step.index,
+            reference=self._plan_anchor_point(step),
         )
         if anchor is not None:
             center, template_path, note = anchor
@@ -1293,8 +1389,14 @@ class PlanExecutor:
         to_target = str(params.get("to_target") or "").strip()
         to_bbox = _bbox_from_params(params.get("to_bbox"))
         if to_target or to_bbox is not None:
+            drop_reference = self._bbox_reference(to_bbox)
             anchor = self._anchor_for_target(
-                to_target, to_bbox, scene, plan, f"drop_{step.index}"
+                to_target,
+                to_bbox,
+                scene,
+                plan,
+                f"drop_{step.index}",
+                reference=drop_reference,
             )
             if anchor is None:
                 return None
@@ -1321,20 +1423,21 @@ class PlanExecutor:
         return None
 
     @staticmethod
-    def _best_ocr_target(
+    def _ocr_candidates(
         target: str,
         scene: SceneObservation,
-    ) -> Optional[tuple[Any, int]]:
-        """Choose a meaningful OCR match without accepting one-letter noise.
+    ) -> list[tuple[int, float, Any]]:
+        """Score every OCR line against ``target`` as ``(score, confidence, line)``.
 
         Substring hits must fall on whole words and a token-overlap hit must
-        cover most of the description, so a weak partial match returns ``None``
+        cover most of the description, so a weak partial match scores nothing
         (the caller then re-anchors on the plan frame) instead of clicking an
-        unrelated label.
+        unrelated label. Rows keep ``scene.text_lines`` order; the tie-break
+        happens in :meth:`_rank_ocr_candidates`.
         """
         needle = _normalise_ocr_text(target)
         if not needle:
-            return None
+            return []
         target_tokens = {
             token
             for token in re.findall(r"[a-z0-9]+", needle)
@@ -1359,10 +1462,96 @@ class PlanExecutor:
                     score = 40 + min(15, 5 * len(overlap))
             if score:
                 candidates.append((score, float(line.confidence), line))
-        if not candidates:
+        return candidates
+
+    @staticmethod
+    def _rank_ocr_candidates(
+        candidates: list[tuple[int, float, Any]],
+        reference: Optional[tuple[int, int]] = None,
+    ) -> list[tuple[int, float, Any]]:
+        """Order scored candidates: match quality, then closeness to ``reference``.
+
+        Two identical labels (a "Search" box in the page and another in a
+        dialog, two "Name" fields in a form) score exactly the same. OCR
+        confidence is an arbitrary tie-break there, and the OCR backend's order
+        is top-to-bottom -- which is how a type step lands in the wrong one of
+        two identical input boxes. The point the plan named is the only
+        evidence of *which* control was meant, so a candidate inside
+        :data:`ANCHOR_PROXIMITY_PX` of it outranks a far one.
+
+        The proximity term never outranks the score bucket, so a strong exact
+        label still beats a weak partial match that happens to sit nearer.
+        """
+
+        def key(item: tuple[int, float, Any]) -> tuple[int, int, int, float]:
+            score, confidence, line = item
+            tier = 0
+            distance = 0
+            if reference is not None:
+                try:
+                    center = line.center
+                    dx = int(center[0]) - int(reference[0])
+                    dy = int(center[1]) - int(reference[1])
+                except (AttributeError, IndexError, TypeError, ValueError):
+                    tier = 1
+                    distance = _UNREACHABLE_DISTANCE_SQ
+                else:
+                    distance = dx * dx + dy * dy
+                    tier = 0 if distance <= ANCHOR_PROXIMITY_PX**2 else 1
+            return (-score, tier, distance, -confidence)
+
+        return sorted(candidates, key=key)
+
+    @staticmethod
+    def _best_ocr_target(
+        target: str,
+        scene: SceneObservation,
+        reference: Optional[tuple[int, int]] = None,
+    ) -> Optional[tuple[Any, int]]:
+        """Choose a meaningful OCR match without accepting one-letter noise.
+
+        Substring hits must fall on whole words and a token-overlap hit must
+        cover most of the description, so a weak partial match yields no target
+        instead of an unrelated label. When several controls match just as
+        well, ``reference`` -- the full-capture point the plan intended -- picks
+        the nearest one.
+        """
+        ranked = PlanExecutor._rank_ocr_candidates(
+            PlanExecutor._ocr_candidates(target, scene), reference
+        )
+        if not ranked:
             return None
-        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return candidates[0][2], candidates[0][0]
+        return ranked[0][2], ranked[0][0]
+
+    def _report_ambiguous_anchor(
+        self,
+        target: str,
+        label: Any,
+        tied: list[tuple[int, float, Any]],
+        chosen: Any,
+        reference: Optional[tuple[int, int]],
+    ) -> None:
+        """Journal that several controls matched, and which one was chosen.
+
+        Picking between equally-scored candidates used to be silent -- the OCR
+        backend's own order decided -- which is exactly how a click lands in
+        the wrong one of two identical input boxes. The note keeps the decision
+        visible in the run report without blocking the step.
+        """
+        others = ", ".join(
+            f"{row[2].text!r} at {tuple(row[2].center)}"
+            for row in tied
+            if row[2] is not chosen
+        )
+        if reference is None:
+            because = "the highest OCR confidence (the plan named no point)"
+        else:
+            because = f"nearest to the planned point {tuple(reference)}"
+        self._journal.warn(
+            f"Step {label}: {len(tied)} controls matched {target!r} "
+            f"({others}); chose {chosen.text!r} at {tuple(chosen.center)} as "
+            f"{because}."
+        )
 
     def _to_input_point(
         self,
@@ -1584,6 +1773,20 @@ class PlanExecutor:
         )
 
     # ------------------------------------------------- action timing guard
+    def _step_progress(self, fraction: float, label: str) -> None:
+        """Report progress inside the current step (locating/acting/verifying).
+
+        The bar is driven per step by :meth:`execute`; these fractional updates
+        are what make it advance *within* a step, which is the difference
+        between "2 of 5" that sits still for ten seconds and a bar that shows
+        the target search, the dispatch and the review as they happen.
+        """
+        total = int(getattr(self, "_progress_total", 0) or 0)
+        if total <= 0:
+            return
+        offset = float(getattr(self, "_progress_offset", 0) or 0)
+        self._journal.progress(min(offset + fraction, total), total, label)
+
     def _is_point_on_screen(self, point: tuple[int, int]) -> bool:
         """Whether a resolved point is inside the virtual desktop.
 

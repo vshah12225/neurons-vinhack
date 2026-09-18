@@ -1313,6 +1313,89 @@ def test_best_ocr_target_needs_majority_word_overlap():
     assert match[0].text == "export report view"
 
 
+def _labeled_scene(*rows) -> SceneObservation:
+    """A scene whose OCR lines are ``(text, (x, y, w, h), confidence)`` rows."""
+    lines = [TextLine(text, BoundingBox(*box), conf) for text, box, conf in rows]
+    return make_scene(np.zeros((480, 640, 3), dtype=np.uint8), lines)
+
+
+def test_best_ocr_target_prefers_the_candidate_nearest_the_plan_point():
+    # Two identical labels. Without the plan's own point the pick is whichever
+    # line OCR read more confidently, which is how a type step lands in the
+    # wrong one of two identical input boxes.
+    scene = _labeled_scene(
+        ("Search", (40, 20, 80, 24), 0.99),
+        ("Search", (40, 300, 80, 24), 0.80),
+    )
+
+    distant = PlanExecutor._best_ocr_target("Search", scene)
+    nearby = PlanExecutor._best_ocr_target("Search", scene, (80, 312))
+
+    assert distant is not None and distant[0].center == (80, 32)
+    assert nearby is not None and nearby[0].center == (80, 312)
+
+
+def test_best_ocr_target_proximity_never_beats_a_higher_score():
+    # A vague description sitting right next to the planned point must not
+    # steal the step from the exact label further away.
+    scene = _labeled_scene(
+        ("Password", (520, 20, 100, 24), 0.99),
+        ("password manager help", (20, 20, 140, 24), 0.99),
+    )
+
+    match = PlanExecutor._best_ocr_target("Password", scene, (30, 30))
+
+    assert match is not None
+    assert match[0].text == "Password"
+
+
+def test_best_ocr_target_without_a_plan_point_keeps_confidence_order():
+    scene = _labeled_scene(
+        ("Search", (40, 20, 80, 24), 0.80),
+        ("Search", (40, 300, 80, 24), 0.99),
+    )
+
+    match = PlanExecutor._best_ocr_target("Search", scene)
+
+    assert match is not None
+    assert match[0].center == (80, 312)
+
+
+def test_executor_clicks_the_field_nearest_the_planned_bbox(tmp_path):
+    settings = make_settings(tmp_path, verify_steps=False)
+    settings.ensure_dirs()
+    context = FakeContext(
+        [
+            _labeled_scene(
+                ("Email", (40, 40, 120, 28), 0.99),
+                ("Email", (40, 300, 120, 28), 0.97),
+            )
+        ]
+    )
+    input_ctl = RecordingInput()
+    journal = make_journal(tmp_path)
+    executor = _drag_executor(settings, context, input_ctl, journal)
+    # The plan drew its bbox around the BOTTOM field, while the top one carries
+    # the higher OCR confidence -- so confidence alone used to win.
+    step = _step(
+        action=ActionType.CLICK,
+        target="Email",
+        bbox=BoundingBox(40, 300, 120, 28),
+    )
+
+    report = executor.execute(
+        "fill the email field", TaskPlan(task_name="t", goal="", steps=[step])
+    )
+
+    assert report.success
+    assert input_ctl.clicks == [(100, 314)]
+    messages = [event.message for event in journal._events]
+    # The choice is visible twice: in the step's anchor note and as a warning
+    # naming every candidate, so a wrong pick is never silent.
+    assert any("nearest of 2 matches" in message for message in messages)
+    assert any("2 controls matched" in message for message in messages)
+
+
 def test_executor_confirms_dispatch_without_waiting_for_a_review_frame(tmp_path):
     settings = make_settings(tmp_path, verify_steps=True, max_step_retries=1)
     settings.ensure_dirs()

@@ -71,6 +71,9 @@ PLAN_SYSTEM_PROMPT = (
     "name or a bbox size you cannot see.\n"
     "Rules: prefer targets anchored to OCR text or icon templates and give "
     "exact pixel coordinates only when the screenshot clearly shows them; "
+    "when the screen shows several identical or similarly labelled controls "
+    "(two \"Search\" boxes, a form of empty fields), add the bbox of the "
+    "exact one you mean so the agent can tell them apart; "
     "use full_capture coordinates by default and set "
     "bbox_coordinate_space=attached_image only when the bbox is measured "
     "directly from the attached image dimensions; "
@@ -138,6 +141,15 @@ PLAN_SYSTEM_PROMPT = (
     "before the next click; the agent also paces its own actions. If an action "
     "produced no screen or state change, do not repeat it -- rule out a modal "
     "or an unfocused window first, then take a different route.\n"
+    "4. Identical controls: a label is not an identity. When several fields "
+    "share a label or placeholder, or several buttons look the same, the "
+    'target text alone does not say which one you mean. Put the bbox ({"x":0,'
+    '"y":0,"width":0,"height":0} in full_capture pixels) of the exact input '
+    'field on the step, or its top-level "x"/"y", because the agent then acts '
+    "on the control nearest that point. Prefer the most distinctive nearby "
+    "text as the target, and never use a generic label (\"Search\", \"Name\", "
+    "\"OK\") as the target for a step when the grounding shows more than one "
+    "control with it.\n"
     "Keyboard shortcuts: for action=key_press put the whole chord in "
     'params.key, e.g. "ctrl+c" (copy), "ctrl+v" (paste), "ctrl+shift+t" '
     '(reopen tab), "alt+tab" (switch window), "win+r" (run dialog), "enter", '
@@ -551,6 +563,9 @@ class TaskPlanner:
     def plan(self, instruction: str) -> TaskPlan:
         """Produce the multi-step plan, escalating models as needed."""
         self._journal.thought(f"Decomposing instruction into steps: {instruction!r}")
+        # The size of the work is not known yet, so the GUI shows an
+        # indeterminate bar until the plan arrives.
+        self._journal.progress(0, 0, "planning the task with the model")
         scene = self._context.observe(instruction)
 
         system = PLAN_SYSTEM_PROMPT
@@ -595,7 +610,9 @@ class TaskPlanner:
                 plan = self._build_plan(instruction, payload, self._model_name(model))
                 self._map_plan_bboxes_to_frame(plan, scene)
                 plan.frame = scene.frame
-                return self._finalize_plan(plan)
+                final = self._finalize_plan(plan)
+                self._journal.progress(0, len(final.steps), "plan ready for approval")
+                return final
             except BudgetExceeded:
                 raise  # do not retry into a budget we already refuse to spend
             except Exception as exc:  # parse errors, network hiccups

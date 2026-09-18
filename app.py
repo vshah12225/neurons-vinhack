@@ -342,7 +342,7 @@ def _safe_settings(settings: Settings) -> dict[str, Any]:
             values[field.name] = value
     return values
 
- 
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Application entry point used by ``python app.py``."""
     parser = create_parser()
