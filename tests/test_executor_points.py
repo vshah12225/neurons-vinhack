@@ -135,7 +135,7 @@ def test_click_step_uses_explicit_pixel_when_no_anchor_matches(monkeypatch):
     assert "explicit pixel" in resolution.anchor_note
 
 
-def test_explicit_pixel_still_loses_to_a_live_anchor(monkeypatch):
+def test_explicit_pixel_takes_priority_over_a_live_anchor(monkeypatch):
     executor = make_executor(monkeypatch)
     step = make_step(
         ActionType.CLICK,
@@ -146,7 +146,7 @@ def test_explicit_pixel_still_loses_to_a_live_anchor(monkeypatch):
 
     resolution = executor._resolve_target(step, scene, make_plan())
 
-    assert resolution.center == (700, 800)
+    assert resolution.center == (10, 10)
 
 
 def test_type_without_anchor_still_uses_the_focused_window(monkeypatch):

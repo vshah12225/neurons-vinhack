@@ -53,6 +53,10 @@ VISUAL_HINT_WORDS = (
     "chart",
     "graph",
     "diagram",
+    "select",
+    "contact",
+    "avatar",
+    "menu",
 )
 
 GATE_SYSTEM_PROMPT = (
@@ -382,6 +386,11 @@ class VisualContextManager:
 
     # ---------------------------------------------------------------- gating
     def _decide_vision(self, instruction: str) -> tuple[bool, str]:
+        # A visual target must be visible to the planner. Do not let the cheap
+        # text-only gate hide the screenshot for icon/contact/menu actions.
+        lowered = instruction.lower()
+        if any(word in lowered for word in VISUAL_HINT_WORDS):
+            return True, "visual target requires the screenshot"
         cached = self._gate_cache.get(instruction)
         if cached is not None:
             return cached

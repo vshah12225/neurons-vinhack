@@ -19,7 +19,13 @@ from furti_ai.memory import MemoryManager
 from furti_ai.models import BoundingBox, ActionType, coerce_action
 from furti_ai.jsoncontract import LLMJsonError
 from furti_ai.ocr import TextLine
-from furti_ai.planner import BudgetExceeded, PlanStep, TaskPlan, TaskPlanner
+from furti_ai.planner import (
+    PLAN_SYSTEM_PROMPT,
+    BudgetExceeded,
+    PlanStep,
+    TaskPlan,
+    TaskPlanner,
+)
 from furti_ai.tasklog import TaskJournal
 
 
@@ -181,6 +187,8 @@ def test_planner_builds_plan_from_json(tmp_path):
     assert plan.steps[0].target == "Export"
     assert plan.steps[1].text == "hello"
     assert plan.frame is not None  # planning-time screenshot retained
+    assert "never ask the user which icon" in PLAN_SYSTEM_PROMPT
+    assert "visual uncertainty yourself" in PLAN_SYSTEM_PROMPT
 
 
 def test_planner_restores_bbox_from_downscaled_attached_image(tmp_path):
@@ -1375,8 +1383,8 @@ def test_executor_clicks_the_field_nearest_the_planned_bbox(tmp_path):
     input_ctl = RecordingInput()
     journal = make_journal(tmp_path)
     executor = _drag_executor(settings, context, input_ctl, journal)
-    # The plan drew its bbox around the BOTTOM field, while the top one carries
-    # the higher OCR confidence -- so confidence alone used to win.
+    # The LLM's bbox is authoritative, so the executor does not spend time
+    # comparing the duplicate OCR labels.
     step = _step(
         action=ActionType.CLICK,
         target="Email",
@@ -1390,10 +1398,7 @@ def test_executor_clicks_the_field_nearest_the_planned_bbox(tmp_path):
     assert report.success
     assert input_ctl.clicks == [(100, 314)]
     messages = [event.message for event in journal._events]
-    # The choice is visible twice: in the step's anchor note and as a warning
-    # naming every candidate, so a wrong pick is never silent.
-    assert any("nearest of 2 matches" in message for message in messages)
-    assert any("2 controls matched" in message for message in messages)
+    assert any("LLM-selected bbox center" in message for message in messages)
 
 
 def test_executor_confirms_dispatch_without_waiting_for_a_review_frame(tmp_path):

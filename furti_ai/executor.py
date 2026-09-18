@@ -1127,6 +1127,22 @@ class PlanExecutor:
         if action is ActionType.DRAG:
             return self._resolve_drag_target(step, scene, plan, point)
 
+        # The planner's current coordinates are the primary source of truth.
+        # Do not let stale OCR/icon matches move a click to another control.
+        if point is not None:
+            return TargetResolution(
+                point, None, f"explicit pixel (LLM-selected) {point[0]},{point[1]}"
+            )
+        if step.bbox is not None:
+            try:
+                center = step.bbox.center
+            except (AttributeError, TypeError):
+                center = None
+            if center is not None:
+                return TargetResolution(
+                    center, None, f"LLM-selected bbox center {center[0]},{center[1]}"
+                )
+
         anchor = self._anchor_for_target(
             step.target or "",
             step.bbox,
@@ -1196,29 +1212,13 @@ class PlanExecutor:
             fuzzy = ContactResolver.resolve_target(
                 target, [line.text for line in scene.text_lines]
             )
-            if fuzzy["status"] == "CONFIRMATION_REQUIRED":
-                callback = getattr(self, "_user_choice_callback", None)
-                if not callable(callback):
-                    self._journal.warn(
-                        f"Step {label}: possible target {fuzzy['matched_text']!r} "
-                        "needs confirmation; no confirmation UI is available."
-                    )
-                    return None
-                from .models import UserChoiceRequest
-
-                answer = callback(
-                    UserChoiceRequest(
-                        question=f"Did you mean '{fuzzy['matched_text']}'?",
-                        options=("yes", "no"),
-                    )
-                )
-                if str(answer or "").strip().lower() not in {"yes", "y"}:
-                    self._journal.warn(
-                        f"Step {label}: target {fuzzy['matched_text']!r} was denied."
-                    )
-                    return None
             if fuzzy["status"] in {"AUTO_MATCH", "CONFIRMATION_REQUIRED"}:
                 target = fuzzy.get("matched_text", target)
+                if fuzzy["status"] == "CONFIRMATION_REQUIRED":
+                    self._journal.thought(
+                        f"Step {label}: choosing fuzzy target "
+                        f"{target!r} automatically and continuing."
+                    )
             ranked = self._rank_ocr_candidates(
                 self._ocr_candidates(target, scene), reference
             )

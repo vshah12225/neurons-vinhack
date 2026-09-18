@@ -327,6 +327,10 @@ retry/re-plan path can react.
 
 ### Cursor actions and explicit pixels
 
+The planner resolves visual targets itself from the screenshot, OCR, and icon
+grounding. It does not ask which icon, button, contact, or screen target to
+press; `ask_user` is reserved for genuinely ambiguous user intent.
+
 The plan vocabulary is `click`, `double_click`, `right_click`, `drag`, `move`,
 `type`, `scroll` and `key_press`. `models.coerce_action` maps the spellings a
 model actually emits onto that set, so an unknown name cannot silently degrade

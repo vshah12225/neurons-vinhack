@@ -421,6 +421,10 @@ and hit/miss counters, and a `x` button to delete it:
 This keeps the safety story simple: nothing fires without the planner the first
 time, and you promote a reflex to fully automatic only after watching it work.
 
+The planner resolves visual targets itself from the screenshot, OCR, and icon
+grounding. It does not ask which icon, button, contact, or screen target to
+press; questions are reserved for genuinely ambiguous user intent.
+
 ### The context file: what the agent knows about you
 
 `<workspace>/context/profile.json` (with a readable `profile.md` mirror) stores
