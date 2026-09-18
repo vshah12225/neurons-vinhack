@@ -418,6 +418,13 @@ class KeyboardController:
             self._backend.hotkey(*keys)
         return keys
 
+    def send_chat_message(self, text: str) -> None:
+        """Type a chat message and submit it as one atomic macro."""
+        if text:
+            self._backend.write(text, interval=self.interval)
+        self._backend.press("enter")
+        time.sleep(0.2)
+
     def hotkey(self, chord: str | Sequence[str]) -> list[str]:
         """Hold every key of the chord down, then release in reverse order."""
         keys = self.parse(chord)

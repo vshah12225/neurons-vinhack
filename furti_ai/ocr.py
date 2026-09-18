@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 import cv2
 import numpy as np
+from rapidfuzz import fuzz, process
 
 from .models import BoundingBox
 
@@ -67,6 +68,28 @@ class IconMatch:
     @property
     def center(self) -> tuple[int, int]:
         return self.bbox.center
+
+
+class ContactResolver:
+    """Resolve slightly misspelled contact or UI text against OCR output."""
+
+    @staticmethod
+    def resolve_target(
+        query: str,
+        visible_screen_text: list[str] | tuple[str, ...],
+        high_threshold: int = 85,
+        low_threshold: int = 60,
+    ) -> dict[str, str]:
+        choices = [str(item).strip() for item in visible_screen_text if str(item).strip()]
+        result = process.extractOne(str(query or ""), choices, scorer=fuzz.WRatio)
+        if result is None:
+            return {"status": "NOT_FOUND"}
+        match, score, _ = result
+        if score >= high_threshold:
+            return {"status": "AUTO_MATCH", "matched_text": match}
+        if score >= low_threshold:
+            return {"status": "CONFIRMATION_REQUIRED", "matched_text": match}
+        return {"status": "NOT_FOUND"}
 
 
 def _points_to_bbox(points: Any, image_shape: tuple[int, int]) -> BoundingBox:

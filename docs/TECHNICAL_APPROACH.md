@@ -178,7 +178,11 @@ embedded (`tk.Toplevel(master=...)`, used by the GUI), selected by the
      `max_plan_replans`) and completed steps are not replayed.
 4. **Compile** — every successfully anchored step is saved as a reusable
    reflex: crop → `templates/<task>_<step>.png` + `Skill` metadata in
-   `memory.json` (description, action, screen size, anchor).
+  `memory.json` (description, action, screen size, anchor). Task-specific
+  typed values are never persisted: a `type` step must declare
+  `params.reflex_variables: ["text"]`, and the saved metadata contains the
+  `{{text}}` placeholder. Callers provide the value at replay time through
+  `AgentOrchestrator.run(command, variables={"text": value})`.
 5. **Report** — `TaskJournal.write_report()` writes `<task_name>.md`
    (plan, per-step results, compiled reflexes, full timestamped log,
    tokens and approximate USD cost).
@@ -782,7 +786,7 @@ key* rather than a different prompt.
 
 | Guardrail | Default | Effect |
 | --- | --- | --- |
-| `max_plan_steps` | 10 | Plan is truncated; a task can never grow unbounded |
+| `max_plan_steps` | 500 | Plan is truncated; a task can never grow unbounded |
 | `max_step_retries` | 2 | Re-anchor + re-plan attempts per step |
 | `max_plan_replans` | 3 | Full replacements of the unfinished route per task |
 | `max_llm_calls_per_task` | 100 | Hard LLM budget; `BudgetExceeded` stops planning/re-planning |
@@ -988,7 +992,7 @@ and a step costs the slower call instead of the sum of both.
 | `FURTI_ALLOW_SHELL_COMMANDS` | `false` disables only `run_command` | `true` |
 | `FURTI_ALLOW_DESTRUCTIVE_COMMANDS` | `true` lets irreversible commands run without `params.confirm` | `false` |
 | `FURTI_TOOL_TIMEOUT` | `run_command` timeout (seconds) | `60` |
-| `FURTI_TOOL_MAX_OUTPUT` | Characters of tool output surfaced per step | `4000` |
+| `FURTI_TOOL_MAX_OUTPUT` | Characters of tool output surfaced per step | `8000` |
 | `FURTI_SCREENSHOT_FORMAT` | Default image format for the screenshot tool | `png` |
 | `FURTI_PROFILE` | Use the user/system context file | `true` |
 | `FURTI_PROFILE_MAX_AGE_DAYS` | Re-detect the environment after this age | `7` |

@@ -7,8 +7,11 @@ tested with a synthetic screen (see ``__main__.py``) and so faster backends
 
 from __future__ import annotations
 
+import time
+from pathlib import Path
 from typing import Any, Protocol
 
+import cv2
 import numpy as np
 
 
@@ -18,6 +21,51 @@ class ScreenCapture(Protocol):
     def capture(self) -> np.ndarray:
         """Return the screen as an HxWx3 BGR ``np.ndarray`` of ``uint8``."""
         ...
+
+
+class ScreenCapturer:
+    """Capture an MSS monitor frame after the display has settled."""
+
+    def __init__(self, monitor: int = 1) -> None:
+        self.monitor = max(1, int(monitor))
+
+    def capture_when_stable(
+        self,
+        output_path: Path | str | None = None,
+        threshold: int = 1000,
+        max_wait_sec: float = 3.0,
+    ) -> tuple[Path | None, np.ndarray]:
+        """Wait for a stable frame and optionally save it as a PNG."""
+        import mss
+
+        with mss.mss() as capture:
+            monitor = capture.monitors[self.monitor]
+            previous = self._frame(capture.grab(monitor))
+            stable = previous
+            deadline = time.monotonic() + max(0.0, float(max_wait_sec))
+            while time.monotonic() < deadline:
+                time.sleep(0.25)
+                current = self._frame(capture.grab(monitor))
+                difference = cv2.absdiff(previous, current)
+                changed = int(np.count_nonzero(np.any(difference != 0, axis=2)))
+                stable = current
+                previous = current
+                if changed < max(0, int(threshold)):
+                    break
+
+        path = (
+            Path(output_path)
+            if output_path is not None
+            else Path.cwd() / "screenshots" / f"stable_{time.time_ns()}.png"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(path), stable):
+            raise OSError(f"could not write stable screenshot to {path}")
+        return path, stable
+
+    @staticmethod
+    def _frame(raw: Any) -> np.ndarray:
+        return cv2.cvtColor(np.asarray(raw), cv2.COLOR_BGRA2BGR)
 
 
 def map_capture_point_to_input(
@@ -54,6 +102,17 @@ class PyAutoGuiScreen:
         # cv2.waitKey(0)  # Wait for a key press to close the window
         # OpenCV works in BGR; convert so matching is consistent everywhere.
         return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    def capture_when_stable(
+        self,
+        output_path: Path | str | None = None,
+        threshold: int = 1000,
+        max_wait_sec: float = 3.0,
+    ) -> tuple[Path | None, np.ndarray]:
+        """Capture a stable MSS frame for screenshots and planning."""
+        return ScreenCapturer().capture_when_stable(
+            output_path, threshold=threshold, max_wait_sec=max_wait_sec
+        )
 
     @staticmethod
     def input_size() -> tuple[int, int]:

@@ -78,6 +78,15 @@ def test_typing_uses_windows_friendly_interval(monkeypatch):
     assert fake.writes == [("hello", 0.02)]
 
 
+def test_send_chat_message_types_and_presses_enter(monkeypatch):
+    controller, fake = make_input(monkeypatch, pause=0.0, teleport_cursor=True)
+
+    controller.send_chat_message("hello")
+
+    assert fake.writes == [("hello", 0.0)]
+    assert fake.events == [("press", "enter", 1, 0.0)]
+
+
 def test_screen_maps_physical_capture_pixels_to_logical_mouse_pixels(monkeypatch):
     fake = SimpleNamespace(size=lambda: SimpleNamespace(width=1280, height=720))
     monkeypatch.setitem(sys.modules, "pyautogui", fake)

@@ -81,7 +81,7 @@ class VisionReflex:
         self.scale_steps = scale_steps
 
     # --------------------------------------------------------------- public
-    def execute(self, skill: Skill) -> bool:
+    def execute(self, skill: Skill, variables: Optional[dict[str, Any]] = None) -> bool:
         """Replay a skill against the live screen.
 
         Returns True if the target was found and the action fired, False
@@ -126,7 +126,7 @@ class VisionReflex:
             confidence,
             f", nearest the stored anchor {tuple(expected)}" if expected else "",
         )
-        self._perform_action(skill, (cx, cy))
+        self._perform_action(skill, (cx, cy), variables or {})
         return True
 
     @staticmethod
@@ -313,11 +313,17 @@ class VisionReflex:
         return peaks
 
     # ------------------------------------------------------------ actuation
-    def _perform_action(self, skill: Skill, center: tuple[int, int]) -> None:
+    def _perform_action(
+        self,
+        skill: Skill,
+        center: tuple[int, int],
+        variables: Optional[dict[str, Any]] = None,
+    ) -> None:
         """Dispatch the skill's action to the input controller."""
         cx, cy = center
         action = skill.action
         metadata = skill.metadata
+        variables = variables or {}
         params = metadata.get("params")
         params = params if isinstance(params, dict) else {}
 
@@ -344,8 +350,14 @@ class VisionReflex:
                 hold_keys=list(hold_keys) if hold_keys else None,
             )
         elif action == ActionType.TYPE:
-            self._input.click(cx, cy)  # focus the field first
             text = str(metadata.get("text") or "")
+            for name in metadata.get("reflex_variables", ()):
+                token = "{{%s}}" % name
+                if token in text:
+                    if name not in variables:
+                        raise ValueError(f"reflex variable {name!r} was not supplied")
+                    text = text.replace(token, str(variables[name]))
+            self._input.click(cx, cy)  # focus the field first
             if text:
                 self._input.type_text(text)
         elif action == ActionType.SCROLL:

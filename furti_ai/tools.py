@@ -1067,7 +1067,8 @@ class DirectToolRunner:
 
             screen = PyAutoGuiScreen()
             self._screen = screen
-        frame = screen.capture()
+        stable_capture = getattr(screen, "capture_when_stable", None)
+        frame = stable_capture()[1] if callable(stable_capture) else screen.capture()
         if frame is None or getattr(frame, "size", 0) == 0:
             raise ToolError("screen capture returned an empty frame")
         return frame

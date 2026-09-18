@@ -138,6 +138,23 @@ class TaskJournal:
         """Record that execution is blocked on an external response."""
         self.record("WAIT", message)
 
+    def interaction_history(self, max_chars: int = 8000) -> str:
+        """Return recent concrete interactions for the next planning prompt."""
+        visible_kinds = {"STEP", "ACTION", "CONFIRM", "SCREENSHOT", "WARN", "ERROR"}
+        with self._lock:
+            lines = [
+                f"{event.kind}: {event.message}"
+                for event in self._events
+                if event.kind in visible_kinds
+            ]
+        if not lines:
+            return "(no previous interactions)"
+        text = "\n".join(lines)
+        limit = max(1, int(max_chars))
+        if len(text) <= limit:
+            return text
+        return "[earlier interactions truncated]\n" + text[-limit:]
+
     def screenshot(
         self,
         captured_at: str,
@@ -168,7 +185,7 @@ class TaskJournal:
         output: Any,
         model: str,
         purpose: str,
-        max_chars: int = 4000,
+        max_chars: int = 8000,
     ) -> None:
         """Show the latest raw model response without flooding the UI."""
         text = str(output).strip()

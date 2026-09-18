@@ -372,7 +372,10 @@ successful **and** the reflex looks genuinely reusable:
 - the template is real geometry: at least 6 px per side and nowhere near the
   whole screen, which would match anything and anchor nothing;
 - the description is specific enough to key a cache entry on;
-- the typed payload is short (a reusable value, not a one-off paragraph).
+- typed steps declare `params.reflex_variables` (currently `text`); the saved
+  reflex contains `{{text}}`, never the task's concrete value. Replay supplies
+  variables through `AgentOrchestrator.run(command, variables={"text": value})`.
+  Typed steps without a declared variable are not cached.
 
 Every refusal is written to the log with its reason, so "why was nothing cached
 for that step?" is always answerable.
@@ -517,6 +520,7 @@ architecture, the feature registry, the loop guardrails and the cost model.
 | `FURTI_VERIFY_PROGRESS` | Independent route monitor after each dispatched step (catches a popup mistaken for page content, or an action landing on the wrong control) | `true` |
 | `FURTI_PARALLEL_VERIFY` | Run the step review and the route monitor at the same time instead of one after the other | `true` |
 | `FURTI_MAX_LLM_CALLS` | Per-task LLM call budget | `100` |
+| `FURTI_MAX_PLAN_STEPS` | Maximum steps retained in a task plan | `500` |
 | `FURTI_MAX_PLAN_REPLANS` | Maximum adaptive route replacements per task | `3` |
 | `FURTI_STATUS_WINDOW` | Disable the Tk overlay (`false`) | `true` |
 | `FURTI_OCR_ENABLED` | OCR text grounding | `true` |
@@ -532,7 +536,7 @@ architecture, the feature registry, the loop guardrails and the cost model.
 | `FURTI_ALLOW_SHELL_COMMANDS` | Allow `run_command` steps | `true` |
 | `FURTI_ALLOW_DESTRUCTIVE_COMMANDS` | Allow irreversible commands without `params.confirm` | `false` |
 | `FURTI_TOOL_TIMEOUT` | Maximum seconds a `run_command` step may take | `60` |
-| `FURTI_TOOL_MAX_OUTPUT` | Maximum characters of tool output surfaced in the log/report | `4000` |
+| `FURTI_TOOL_MAX_OUTPUT` | Maximum characters of tool output surfaced in the log/report | `8000` |
 | `FURTI_SCREENSHOT_FORMAT` | Default image format for the screenshot tool | `png` |
 | `FURTI_PROFILE` | Detect and use the user/system context file | `true` |
 | `FURTI_PROFILE_MAX_AGE_DAYS` | Re-detect the environment when the profile is older than this | `7` |

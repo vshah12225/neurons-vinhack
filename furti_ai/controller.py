@@ -52,6 +52,10 @@ class InputController(Protocol):
         """Type a string into the focused element."""
         ...
 
+    def send_chat_message(self, text: str) -> None:
+        """Type and submit a chat message."""
+        ...
+
     def press_key(self, key: str, presses: int = 1) -> None:
         """Press a key or key chord (e.g. ``"enter"``, ``"ctrl+c"``)."""
         ...
@@ -337,6 +341,10 @@ class PyAutoGuiInput:
         # A tiny interval is intentional: sending the whole string in one
         # burst can drop characters in Windows controls with busy event loops.
         self._pyautogui.write(text, interval=self.typing_interval)
+
+    def send_chat_message(self, text: str) -> None:
+        """Type a message, press Enter, and allow the app to process it."""
+        self._keyboard.send_chat_message(text)
 
     def press_key(self, key: str, presses: int = 1) -> None:
         """Press a single key or a ``+``-joined chord such as ``ctrl+shift+t``."""

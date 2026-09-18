@@ -58,7 +58,9 @@ class AgentOrchestrator:
         self._realigner = realigner
         self._journal = journal
 
-    def run(self, command: str) -> bool:
+    def run(
+        self, command: str, variables: dict[str, Any] | None = None
+    ) -> bool:
         """Execute a natural-language command. Returns True on success."""
         name = self._memory.normalize_name(command)
         # Reflexes are compiled disabled, so replay must ask for an enabled one
@@ -74,12 +76,17 @@ class AgentOrchestrator:
         if skill is not None:
             logger.info("Cache hit for %r; replaying reflex.", name)
             print("Cache hit for %r; replaying reflex.", name)
-            if self._vision.execute(skill):
+            replayed = (
+                self._vision.execute(skill)
+                if variables is None
+                else self._vision.execute(skill, variables)
+            )
+            if replayed:
                 self._memory.record_success(name)
                 print("True")
                 return True
             logger.warning("Reflex failed for %r; re-aligning it.", name)
-            if self._handle_reflex_failure(skill) is not None:
+            if self._handle_reflex_failure(skill, variables) is not None:
                 print("True")
                 return True
 
@@ -90,7 +97,9 @@ class AgentOrchestrator:
 
         return self._plan_and_run(command, name)
 
-    def _handle_reflex_failure(self, skill) -> Any:
+    def _handle_reflex_failure(
+        self, skill, variables: dict[str, Any] | None = None
+    ) -> Any:
         """Count the miss, retire an unusable reflex, else re-align it.
 
         Returns the repaired skill when the re-aligned reflex replays
@@ -118,7 +127,12 @@ class AgentOrchestrator:
             logger.warning("Re-alignment did not help for %r.", skill.name)
             return None
         # The template was rewritten in place: replay it once.
-        if self._vision.execute(result.skill):
+        replayed = (
+            self._vision.execute(result.skill)
+            if variables is None
+            else self._vision.execute(result.skill, variables)
+        )
+        if replayed:
             self._memory.record_success(skill.name)
             return result.skill
         return None
@@ -452,6 +466,7 @@ def build_task_agent(
     executor = PlanExecutor(
         settings, journal, vision, controller, memory, planner, context,
         task_stop_event, task_slug="task", verifier=verifier,
+        user_choice_callback=user_choice_callback,
     )
     kill_switch = KillSwitch(settings.kill_hotkey, task_stop_event)
 

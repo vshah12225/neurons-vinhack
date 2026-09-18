@@ -105,6 +105,26 @@ def test_match_keeps_the_global_best_when_it_is_clearly_better():
     assert match[0] == TOP_LEFT
 
 
+def test_type_reflex_substitutes_declared_variable():
+    frame = _frame(TOP_LEFT)
+    controller = RecordingInput()
+    reflex = _reflex(frame, controller)
+    template_path = Path(__file__).with_name("_reflex_variable_template.png")
+    cv2.imwrite(str(template_path), PATTERN)
+    try:
+        skill = Skill(
+            name="type_search_value",
+            template_path=str(template_path),
+            action=ActionType.TYPE,
+            metadata={"text": "{{text}}", "reflex_variables": ["text"]},
+        )
+
+        assert reflex.execute(skill, {"text": "quarterly report"}) is True
+        assert controller.typed == ["quarterly report"]
+    finally:
+        template_path.unlink(missing_ok=True)
+
+
 def test_locate_on_passes_the_reference_point_through():
     frame = _frame(TOP_LEFT, BOTTOM_RIGHT)
     reflex = _reflex(frame)

@@ -104,6 +104,25 @@ def test_icon_matcher_uses_cached_templates_and_exact_scale_by_default(tmp_path)
     assert matcher.multi_scale is False
 
 
+def test_contact_resolver_handles_minor_name_difference():
+    from furti_ai.ocr import ContactResolver
+
+    result = ContactResolver.resolve_target("vishesh", ["vishessh friend"])
+
+    assert result == {
+        "status": "CONFIRMATION_REQUIRED",
+        "matched_text": "vishessh friend",
+    }
+
+
+def test_contact_resolver_requires_confirmation_for_ambiguous_score():
+    from furti_ai.ocr import ContactResolver
+
+    result = ContactResolver.resolve_target("vishesh", ["vishesh colleague"], 99, 60)
+
+    assert result["status"] == "CONFIRMATION_REQUIRED"
+
+
 def test_icon_matcher_skips_executor_anchor_crops(tmp_path):
     import cv2
     from furti_ai.ocr import IconMatcher, is_auto_crop_template

@@ -42,6 +42,9 @@ SYSTEM_PROMPT = (
     "(never as [left, top, right, bottom]). The bounding box must tightly "
     "surround the target element so it can be "
     "cropped and re-matched later. Return JSON only, with no markdown and no tool name."
+    " When sending messages in messaging apps (WhatsApp, Slack, Discord), always "
+    "call send_chat_message rather than raw type_text to guarantee the message "
+    "is transmitted."
 )
 
 
@@ -785,7 +788,12 @@ class BrainPlanner:
         degrade to a clean ``None`` result rather than crash the run loop.
         """
         logger.debug("BrainPlanner.plan start: task=%r prompt=%r", task_name, user_prompt)
-        screen_img = self._screen.capture()
+        stable_capture = getattr(self._screen, "capture_when_stable", None)
+        screen_img = (
+            stable_capture()[1]
+            if callable(stable_capture)
+            else self._screen.capture()
+        )
         logger.debug("Captured screenshot size=%s shape=%s", screen_img.shape[:2], screen_img.shape)
         image_b64 = self._encode_png(screen_img)
         logger.debug("Encoded screenshot bytes=%d", len(image_b64))

@@ -173,7 +173,7 @@ class Settings:
     # Multi-step task guardrails (anti-endless-loop / token budget).
     # ------------------------------------------------------------------
     max_plan_steps: int = field(
-        default_factory=lambda: int(os.getenv("FURTI_MAX_PLAN_STEPS", "10"))
+        default_factory=lambda: int(os.getenv("FURTI_MAX_PLAN_STEPS", "500"))
     )
     max_step_retries: int = field(
         default_factory=lambda: int(os.getenv("FURTI_MAX_STEP_RETRIES", "2"))
@@ -303,7 +303,7 @@ class Settings:
     )
     # How much tool output (stdout, file excerpt, window list) is surfaced.
     tool_max_output_chars: int = field(
-        default_factory=lambda: int(os.getenv("FURTI_TOOL_MAX_OUTPUT", "4000"))
+        default_factory=lambda: int(os.getenv("FURTI_TOOL_MAX_OUTPUT", "8000"))
     )
     # Default image format for the screenshot tool.
     screenshot_format: str = field(

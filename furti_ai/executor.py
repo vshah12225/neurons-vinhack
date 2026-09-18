@@ -45,7 +45,7 @@ from .jsoncontract import extract_json_object
 from .keyboard import ChordError, parse_chord
 from .memory import MemoryManager
 from .models import REFLEX_ACTIONS, ActionType, BoundingBox, Skill
-from .ocr import AUTO_CROP_SUFFIX
+from .ocr import AUTO_CROP_SUFFIX, ContactResolver
 from .planner import PlanStep, TaskPlan, TaskPlanner
 from .tasklog import TaskJournal
 from .tools import DirectToolRunner, ToolResult, is_direct_tool
@@ -298,6 +298,7 @@ class PlanExecutor:
         stop_event: Any,
         task_slug: str,
         verifier: Any = None,
+        user_choice_callback: Any = None,
     ) -> None:
         self._settings = settings
         self._journal = journal
@@ -314,6 +315,7 @@ class PlanExecutor:
         #: Independent second-opinion reviewer (see ``verifier.py``). ``None``
         #: or disabled means the step runs unverified, as before.
         self._verifier = verifier
+        self._user_choice_callback = user_choice_callback
         #: Set by :meth:`execute` so the verifier can be given the task text.
         self._instruction = ""
         #: Monotonic timestamp of the last dispatched UI action, used to pace
@@ -1191,6 +1193,32 @@ class PlanExecutor:
                     )
 
         if target:
+            fuzzy = ContactResolver.resolve_target(
+                target, [line.text for line in scene.text_lines]
+            )
+            if fuzzy["status"] == "CONFIRMATION_REQUIRED":
+                callback = getattr(self, "_user_choice_callback", None)
+                if not callable(callback):
+                    self._journal.warn(
+                        f"Step {label}: possible target {fuzzy['matched_text']!r} "
+                        "needs confirmation; no confirmation UI is available."
+                    )
+                    return None
+                from .models import UserChoiceRequest
+
+                answer = callback(
+                    UserChoiceRequest(
+                        question=f"Did you mean '{fuzzy['matched_text']}'?",
+                        options=("yes", "no"),
+                    )
+                )
+                if str(answer or "").strip().lower() not in {"yes", "y"}:
+                    self._journal.warn(
+                        f"Step {label}: target {fuzzy['matched_text']!r} was denied."
+                    )
+                    return None
+            if fuzzy["status"] in {"AUTO_MATCH", "CONFIRMATION_REQUIRED"}:
+                target = fuzzy.get("matched_text", target)
             ranked = self._rank_ocr_candidates(
                 self._ocr_candidates(target, scene), reference
             )
@@ -2148,7 +2176,13 @@ class PlanExecutor:
                     "field before typing."
                 )
                 self._controller.click(cx, cy)
-            self._controller.type_text(str(step.text))
+            if params.get("send_chat_message"):
+                sender = getattr(self._controller, "send_chat_message", None)
+                if not callable(sender):
+                    raise RuntimeError("controller cannot send chat messages")
+                sender(str(step.text))
+            else:
+                self._controller.type_text(str(step.text))
         elif action == ActionType.SCROLL:
             self._controller.scroll(int(params.get("scroll_clicks", 3)))
         elif action == ActionType.KEY_PRESS:
@@ -2503,6 +2537,12 @@ class PlanExecutor:
                     f"the typed payload is {len(typed)} characters, which is a "
                     "one-off rather than a reusable reflex"
                 )
+            variables = (step.params or {}).get("reflex_variables")
+            if not isinstance(variables, (list, tuple, set)) or "text" not in variables:
+                return (
+                    "typed payload has no declared reflex variable; task-specific "
+                    "text is not reusable"
+                )
 
         image = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
         if image is None:
@@ -2550,10 +2590,12 @@ class PlanExecutor:
         params = {
             key: value for key, value in (step.params or {}).items() if _is_jsonable(value)
         }
+        reflex_variables = list((step.params or {}).get("reflex_variables", ()))
         metadata: dict[str, Any] = {
             "description": step.description,
             "action": step.action.value,
-            "text": step.text,
+            "text": "{{text}}" if step.action is ActionType.TYPE else step.text,
+            "reflex_variables": reflex_variables,
             "target": step.target,
             "params": params,
             "anchor": anchor_note,

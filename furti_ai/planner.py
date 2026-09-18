@@ -58,7 +58,8 @@ PLAN_SYSTEM_PROMPT = (
     '"bbox": {"x":0,"y":0,"width":0,"height":0} | null, '
     '"bbox_coordinate_space": "full_capture" | "attached_image", '
     '"text": "<text to type when action is type>", '
-    '"params": {"key": "enter", "scroll_clicks": 3, "window": "Notepad"}, '
+    '"params": {"key": "enter", "scroll_clicks": 3, "window": "Notepad", '
+    '"reflex_variables": ["text"], "send_chat_message": true}, '
     '"thought": "<why this step, one line>"}]}\n'
     "Output contract (strict, verified before anything moves): respond with "
     "exactly ONE JSON object and nothing else -- no prose, no markdown fences, "
@@ -78,6 +79,10 @@ PLAN_SYSTEM_PROMPT = (
     "bbox_coordinate_space=attached_image only when the bbox is measured "
     "directly from the attached image dimensions; "
     "never invent coordinates you cannot see; keep the step count minimal; "
+    "when a type step should be reusable, put \"text\" in params.reflex_variables; "
+    "otherwise its concrete text will not be cached as a reflex; "
+    "when sending a message in a chat app, set params.send_chat_message=true "
+    "so the executor types it and presses Enter atomically; "
     "set requires_smart_model=true only when the task genuinely needs complex "
         "multi-condition reasoning; the deep pass re-runs the model in thinking "
         "mode and is slower, so use this flag sparingly. If the user's intent is genuinely ambiguous "
@@ -559,6 +564,13 @@ class TaskPlanner:
             logger.debug("profile prompt block failed: %s", exc)
             return ""
 
+    def _interaction_block(self) -> str:
+        """Describe concrete actions already taken during this task."""
+        history = getattr(self._journal, "interaction_history", None)
+        if not callable(history):
+            return "(no previous interactions)"
+        return history(8000)
+
     # ------------------------------------------------------------ public API
     def plan(self, instruction: str) -> TaskPlan:
         """Produce the multi-step plan, escalating models as needed."""
@@ -567,6 +579,7 @@ class TaskPlanner:
         # indeterminate bar until the plan arrives.
         self._journal.progress(0, 0, "planning the task with the model")
         scene = self._context.observe(instruction)
+        interaction_block = self._interaction_block()
 
         system = PLAN_SYSTEM_PROMPT
         profile_block = self._profile_block()
@@ -574,6 +587,8 @@ class TaskPlanner:
             f"User instruction: {instruction}\n\n"
             + (f"{profile_block}\n\n" if profile_block else "")
             + f"{scene.prompt_block()}\n\n"
+            f"Running interaction log (do not repeat completed actions):\n"
+            f"{interaction_block}\n\n"
             "Produce the multi-step JSON plan now."
         )
 
@@ -657,6 +672,7 @@ class TaskPlanner:
             f"(re-align step {failed.index})..."
         )
         profile_block = self._profile_block()
+        interaction_block = self._interaction_block()
         anchor = failed.target or (
             f"bbox {failed.bbox.x},{failed.bbox.y} "
             f"{failed.bbox.width}x{failed.bbox.height}"
@@ -671,6 +687,8 @@ class TaskPlanner:
             f"Previous anchor: {anchor}\n"
             f"Parameters: {json.dumps(failed.params or {}, default=str)}\n"
             f"Failure reason: {failure_reason}\n\n"
+            f"Running interaction log (do not repeat completed actions):\n"
+            f"{interaction_block}\n\n"
             + (f"{profile_block}\n\n" if profile_block else "")
             + f"{scene.prompt_block()}\n\n"
             "Return the same step re-anchored to what the current screen "
@@ -737,10 +755,13 @@ class TaskPlanner:
         )
 
         profile_block = self._profile_block()
+        interaction_block = self._interaction_block()
         user = (
             f"Whole task: {instruction}\n\n"
             f"Failed step: {failed.description} [{failed.action.value}]\n"
             f"Failure reason: {failure_reason}\n\n"
+            f"Running interaction log (do not repeat completed actions):\n"
+            f"{interaction_block}\n\n"
             + (f"{profile_block}\n\n" if profile_block else "")
             + f"{scene.prompt_block()}\n\n"
             "Produce the single replacement step JSON now."
@@ -810,12 +831,15 @@ class TaskPlanner:
             for step in current_plan.steps[len(completed_steps):]
         ) or "(none)"
         profile_block = self._profile_block()
+        interaction_block = self._interaction_block()
         user = (
             f"Whole task: {instruction}\n\n"
             f"Completed steps:\n{completed}\n\n"
             f"Failed step: {failed_step.description} [{failed_step.action.value}]\n"
             f"Failure reason: {failure_reason}\n\n"
             f"Original remaining plan:\n{remaining}\n\n"
+            f"Running interaction log (do not repeat completed actions):\n"
+            f"{interaction_block}\n\n"
             + (f"{profile_block}\n\n" if profile_block else "")
             + f"{scene.prompt_block()}\n\n"
             "Return only the replacement steps still needed."

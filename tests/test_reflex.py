@@ -633,6 +633,44 @@ def test_gate_rejects_a_one_off_typed_payload(tmp_path):
     assert "one-off" in reason
 
 
+def test_gate_rejects_typed_text_without_a_declared_variable(tmp_path):
+    executor, _scene, frame = make_gate_executor(tmp_path)
+    step = PlanStep(
+        1,
+        "Type the search value",
+        ActionType.TYPE,
+        text="quarterly report",
+        target="Search",
+    )
+
+    reason = gate(executor, step, frame, "OCR text 'Search'")
+
+    assert reason is not None
+    assert "declared reflex variable" in reason
+
+
+def test_compiled_typed_reflex_persists_a_placeholder_not_the_value(tmp_path):
+    executor, scene, _frame = make_gate_executor(tmp_path)
+    step = PlanStep(
+        1,
+        "Type the search value",
+        ActionType.TYPE,
+        text="quarterly report",
+        target="Search",
+        params={"reflex_variables": ["text"]},
+    )
+    template = executor._settings.templates_dir / "typed.png"
+    cv2.imwrite(str(template), np.full((20, 40, 3), 200, dtype="uint8"))
+
+    assert executor._reflex_skip_reason(step, template, scene, "OCR text 'Search'") is None
+    name = executor._compile_reflex(step, template, scene, "OCR text 'Search'")
+    skill = executor._memory.get_skill(name)
+
+    assert skill is not None
+    assert skill.metadata["text"] == "{{text}}"
+    assert skill.metadata["reflex_variables"] == ["text"]
+
+
 def test_gate_rejects_a_tiny_template(tmp_path):
     executor, _scene, frame = make_gate_executor(tmp_path)
     step = PlanStep(1, "Click the Export button", ActionType.CLICK, target="Export")
